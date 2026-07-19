@@ -363,6 +363,80 @@ bot.command('reminder', (ctx) => requireAdmin(ctx, async () => {
 }));
 
 // ---------------------------------------------------------------------------
+// ADMIN MENU (/admin) — button-based menu that groups the admin commands above
+// ---------------------------------------------------------------------------
+
+bot.command('admin', (ctx) => requireAdmin(ctx, async () => {
+    await ctx.reply('🛠 Admin panel — kerakli bo\'limni tanlang:', {
+          reply_markup: {
+                  inline_keyboard: [
+                            [{ text: '📊 Statistika', callback_data: 'admin_stats' }, { text: '👥 Leadlar', callback_data: 'admin_leads' }],
+                            [{ text: '📤 Export CSV', callback_data: 'admin_export' }, { text: '⏰ Reminder', callback_data: 'admin_reminder' }],
+                            [{ text: 'ℹ️ Broadcast yordam', callback_data: 'admin_broadcast_help' }]
+                          ]
+          }
+    });
+}));
+
+bot.action('admin_stats', (ctx) => requireAdmin(ctx, async () => {
+    await ctx.answerCbQuery();
+    const leads = allLeads();
+    const completed = leads.filter(l => l.status === 'completed').length;
+    const pending = leads.filter(l => l.status !== 'completed').length;
+    const today = new Date().toISOString().slice(0, 10);
+    const todayCount = leads.filter(l => (l.created_at || '').slice(0, 10) === today).length;
+    await ctx.reply(
+          `📊 Statistika\n\n` +
+          `Jami: ${leads.length}\n` +
+          `To'liq ro'yxatdan o'tgan: ${completed}\n` +
+          `Yarim yo'lda to'xtagan: ${pending}\n` +
+          `Bugun kelgan: ${todayCount}`
+        );
+}));
+
+bot.action('admin_leads', (ctx) => requireAdmin(ctx, async () => {
+    await ctx.answerCbQuery();
+    const leads = allLeads().sort((a, b) => new Date(b.created_at) - new Date(a.created_at)).slice(0, 20);
+    if (leads.length === 0) return ctx.reply('Hali leadlar yo\'q.');
+    const lines = leads.map((l, i) => `${i + 1}. ${l.name || '—'} | ${l.phone || '—'} | @${l.username || '—'} | ${l.status}`);
+    await ctx.reply(`So'nggi ${leads.length} ta lead:\n\n` + lines.join('\n'));
+}));
+
+bot.action('admin_export', (ctx) => requireAdmin(ctx, async () => {
+    await ctx.answerCbQuery();
+    const leads = allLeads();
+    const header = 'user_id,username,name,phone,status,created_at,updated_at';
+    const rows = leads.map(l => [
+          l.user_id, l.username, l.name, l.phone, l.status, l.created_at, l.updated_at
+        ].map(v => `"${String(v || '').replace(/"/g, '""')}"`).join(','));
+    const csv = [header, ...rows].join('\n');
+    await ctx.replyWithDocument({
+          source: Buffer.from(csv, 'utf8'),
+          filename: `leads-${new Date().toISOString().slice(0, 10)}.csv`
+    });
+}));
+
+bot.action('admin_reminder', (ctx) => requireAdmin(ctx, async () => {
+    await ctx.answerCbQuery();
+    const stuck = allLeads().filter(l => l.status !== 'completed');
+    if (stuck.length === 0) return ctx.reply("Yarim yo'lda to'xtagan hech kim yo'q 🎉");
+    const text = "Salom! Vebinar kanaliga qo'shilish uchun ro'yxatdan o'tishni yakunlamagansiz. Davom etish uchun telefon raqamingizni yuboring 👇";
+    await broadcastToAll(ctx, (userId) => ctx.telegram.sendMessage(userId, text, contactKeyboard()));
+}));
+
+bot.action('admin_broadcast_help', (ctx) => requireAdmin(ctx, async () => {
+    await ctx.answerCbQuery();
+    await ctx.reply(
+          "Quyidagi buyruqlarni qo'lda yuboring:\n\n" +
+          "/broadcast Matn — hammaga matn yuborish\n" +
+          "/broadcast_photo Matn — (rasmga reply qilib)\n" +
+          "/broadcast_video — (yumaloq videoga reply qilib)\n" +
+          "/broadcast_voice — (ovozli xabarga reply qilib)\n" +
+          "/import_leads — (CSV faylga reply qilib)"
+        );
+}));
+
+// ---------------------------------------------------------------------------
 bot.launch();
 console.log('Bot started. Leads DB path:', DB_PATH);
 
