@@ -145,6 +145,7 @@ function contactKeyboard() {
 
 async function completeRegistration(ctx, lead) {
   await ctx.reply(
+    "🎉 Tabriklaymiz!\n\n" +
     "Balkim hammasi shu yerdan boshlanar. Sizdan yana uchta qadam qoldi 👇🏻\n\n" +
     `1. Hoziroq kanalga qo'shilib oling: ${CHANNEL_LINK}\n` +
     "2. Kanalni «PIN» qiling\n" +
@@ -167,8 +168,7 @@ bot.start(async (ctx) => {
   pendingStep.set(ctx.from.id, 'name');
 
   await ctx.reply(
-    "Xush kelibsiz, rivojlanish yo'lidagi inson!\n\n" +
-    "Shu yergacha kelishingizni bilardik) Qoil-e 🥹\n\n" +
+    "🇰🇷 Xush kelibsiz, Koreada GRANT asosida o'qish sari qadam qo'ygan inson!\n\n" +
     "Kanalga qo'shilishingiz uchun yana bir qadam qoldi.\n\n" +
     "Ismingizni yozib yuboring ✍️"
   );
