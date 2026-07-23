@@ -30,6 +30,31 @@ if (!BOT_TOKEN) {
 const bot = new Telegraf(BOT_TOKEN);
 
 // ---------------------------------------------------------------------------
+// TASHKENT-TIMEZONE DATE HELPERS
+// Railway containers run on UTC, but "kun" (the day) for this bot means the
+// Uzbekistan calendar day. These helpers compute day boundaries in Asia/Tashkent
+// (UTC+5, no DST) regardless of the server's own timezone.
+// ---------------------------------------------------------------------------
+
+const TASHKENT_OFFSET_MS = 5 * 60 * 60 * 1000;
+
+function toTashkentDateStr(isoString) {
+  if (!isoString) return '';
+  const shifted = new Date(new Date(isoString).getTime() + TASHKENT_OFFSET_MS);
+  return shifted.toISOString().slice(0, 10);
+}
+
+function msUntilNextTashkentMidnight() {
+  const now = new Date();
+  const tashkentNow = new Date(now.getTime() + TASHKENT_OFFSET_MS);
+  const nextMidnightTashkent = new Date(Date.UTC(
+    tashkentNow.getUTCFullYear(), tashkentNow.getUTCMonth(), tashkentNow.getUTCDate() + 1, 0, 0, 0
+  ));
+  const realUtcTarget = nextMidnightTashkent.getTime() - TASHKENT_OFFSET_MS;
+  return realUtcTarget - now.getTime();
+}
+
+// ---------------------------------------------------------------------------
 // PERSISTENT LEAD STORE
 // Leads are NEVER deleted. This file is append/update-only via upsertLead().
 // Stored as { [user_id]: leadObject } for O(1) lookups, but exported/iterated
@@ -145,7 +170,6 @@ function contactKeyboard() {
 
 async function completeRegistration(ctx, lead) {
   await ctx.reply(
-    "🎉 Tabriklaymiz!\n\n" +
     "Balkim hammasi shu yerdan boshlanar. Sizdan yana uchta qadam qoldi 👇🏻\n\n" +
     `1. Hoziroq kanalga qo'shilib oling: ${CHANNEL_LINK}\n` +
     "2. Kanalni «PIN» qiling\n" +
@@ -154,6 +178,24 @@ async function completeRegistration(ctx, lead) {
     { reply_markup: { remove_keyboard: true } }
   );
   forwardToSheets(lead);
+  notifyAdminsNewLead(lead);
+}
+
+async function notifyAdminsNewLead(lead) {
+  const text =
+    `🆕 Yangi lead!\n\n` +
+    `👤 Ism: ${lead.name || '—'}\n` +
+    `📞 Tel: ${lead.phone || '—'}\n` +
+    `✈️ Username: @${lead.username || '—'}\n` +
+    `🕒 ${lead.updated_at}`;
+
+  for (const adminId of ADMIN_IDS) {
+    try {
+      await bot.telegram.sendMessage(adminId, text);
+    } catch (err) {
+      console.error(`New-lead notify to admin ${adminId} failed:`, err);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -168,9 +210,10 @@ bot.start(async (ctx) => {
   pendingStep.set(ctx.from.id, 'name');
 
   await ctx.reply(
-    "🇰🇷 Xush kelibsiz, Koreada GRANT asosida o'qish sari qadam qo'ygan inson!\n\n" +
+    "Xush kelibsiz, rivojlanish yo'lidagi inson! 🌱\n\n" +
+    "Shu yergacha kelishingizni bilardik) Qoil-e 🥹\n\n" +
     "Kanalga qo'shilishingiz uchun yana bir qadam qoldi.\n\n" +
-    "Ismingizni yozib yuboring ✍️"
+    "Ismingiz nima ekan? Yozib yuboring ✍️"
   );
 });
 
@@ -229,8 +272,8 @@ bot.command('stats', (ctx) => requireAdmin(ctx, async () => {
   const leads = allLeads();
   const completed = leads.filter(l => l.status === 'completed').length;
   const pending = leads.filter(l => l.status !== 'completed').length;
-  const today = new Date().toISOString().slice(0, 10);
-  const todayCount = leads.filter(l => (l.created_at || '').slice(0, 10) === today).length;
+  const today = toTashkentDateStr(new Date().toISOString());
+  const todayCount = leads.filter(l => toTashkentDateStr(l.created_at) === today).length;
 
   await ctx.reply(
     `📊 Statistika\n\n` +
@@ -256,16 +299,20 @@ bot.command('leads', (ctx) => requireAdmin(ctx, async () => {
 
 bot.command('export', (ctx) => requireAdmin(ctx, async () => {
   const leads = allLeads();
+
+  if (leads.length === 0) return ctx.reply("Hali export qiladigan lead yo'q.");
+
   const header = 'user_id,username,name,phone,status,created_at,updated_at';
   const rows = leads.map(l => [
     l.user_id, l.username, l.name, l.phone, l.status, l.created_at, l.updated_at
   ].map(v => `"${String(v || '').replace(/"/g, '""')}"`).join(','));
-  const csv = [header, ...rows].join('\n');
+  // BOM prefix so Excel/Sheets render Uzbek/Cyrillic characters correctly
+  const csv = '\uFEFF' + [header, ...rows].join('\n');
 
-  await ctx.replyWithDocument({
-    source: Buffer.from(csv, 'utf8'),
-    filename: `leads-${new Date().toISOString().slice(0, 10)}.csv`
-  });
+  await ctx.replyWithDocument(
+    { source: Buffer.from(csv, 'utf8'), filename: `leads-${new Date().toISOString().slice(0, 10)}.csv` },
+    { caption: `Jami: ${leads.length} ta lead (bazadagi hammasi, filtrsiz).` }
+  );
 }));
 
 bot.command('import_leads', (ctx) => requireAdmin(ctx, async () => {
@@ -363,78 +410,36 @@ bot.command('reminder', (ctx) => requireAdmin(ctx, async () => {
 }));
 
 // ---------------------------------------------------------------------------
-// ADMIN MENU (/admin) — button-based menu that groups the admin commands above
+// DAILY LEAD COUNT SUMMARY — fires right after Tashkent midnight, reports
+// yesterday's lead count to every admin. Self-reschedules every 24h after
+// the first fire, so it keeps firing at the same Tashkent-local time.
 // ---------------------------------------------------------------------------
 
-bot.command('admin', (ctx) => requireAdmin(ctx, async () => {
-    await ctx.reply('🛠 Admin panel — kerakli bo\'limni tanlang:', {
-          reply_markup: {
-                  inline_keyboard: [
-                            [{ text: '📊 Statistika', callback_data: 'admin_stats' }, { text: '👥 Leadlar', callback_data: 'admin_leads' }],
-                            [{ text: '📤 Export CSV', callback_data: 'admin_export' }, { text: '⏰ Reminder', callback_data: 'admin_reminder' }],
-                            [{ text: 'ℹ️ Broadcast yordam', callback_data: 'admin_broadcast_help' }]
-                          ]
-          }
-    });
-}));
+async function sendDailySummary() {
+  const yesterday = toTashkentDateStr(new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString());
+  const leads = allLeads();
+  const count = leads.filter(l => toTashkentDateStr(l.created_at) === yesterday).length;
+  const text = `📅 ${yesterday} kuni: ${count} ta yangi lead keldi.\n\nJami (hozirgacha): ${leads.length} ta lead.`;
 
-bot.action('admin_stats', (ctx) => requireAdmin(ctx, async () => {
-    await ctx.answerCbQuery();
-    const leads = allLeads();
-    const completed = leads.filter(l => l.status === 'completed').length;
-    const pending = leads.filter(l => l.status !== 'completed').length;
-    const today = new Date().toISOString().slice(0, 10);
-    const todayCount = leads.filter(l => (l.created_at || '').slice(0, 10) === today).length;
-    await ctx.reply(
-          `📊 Statistika\n\n` +
-          `Jami: ${leads.length}\n` +
-          `To'liq ro'yxatdan o'tgan: ${completed}\n` +
-          `Yarim yo'lda to'xtagan: ${pending}\n` +
-          `Bugun kelgan: ${todayCount}`
-        );
-}));
+  for (const adminId of ADMIN_IDS) {
+    try {
+      await bot.telegram.sendMessage(adminId, text);
+    } catch (err) {
+      console.error(`Daily summary send to admin ${adminId} failed:`, err);
+    }
+  }
+}
 
-bot.action('admin_leads', (ctx) => requireAdmin(ctx, async () => {
-    await ctx.answerCbQuery();
-    const leads = allLeads().sort((a, b) => new Date(b.created_at) - new Date(a.created_at)).slice(0, 20);
-    if (leads.length === 0) return ctx.reply('Hali leadlar yo\'q.');
-    const lines = leads.map((l, i) => `${i + 1}. ${l.name || '—'} | ${l.phone || '—'} | @${l.username || '—'} | ${l.status}`);
-    await ctx.reply(`So'nggi ${leads.length} ta lead:\n\n` + lines.join('\n'));
-}));
+function scheduleDailySummary() {
+  const delay = msUntilNextTashkentMidnight();
+  setTimeout(() => {
+    sendDailySummary();
+    setInterval(sendDailySummary, 24 * 60 * 60 * 1000);
+  }, delay);
+  console.log(`Daily summary scheduled — first run in ${Math.round(delay / 60000)} min.`);
+}
 
-bot.action('admin_export', (ctx) => requireAdmin(ctx, async () => {
-    await ctx.answerCbQuery();
-    const leads = allLeads();
-    const header = 'user_id,username,name,phone,status,created_at,updated_at';
-    const rows = leads.map(l => [
-          l.user_id, l.username, l.name, l.phone, l.status, l.created_at, l.updated_at
-        ].map(v => `"${String(v || '').replace(/"/g, '""')}"`).join(','));
-    const csv = [header, ...rows].join('\n');
-    await ctx.replyWithDocument({
-          source: Buffer.from(csv, 'utf8'),
-          filename: `leads-${new Date().toISOString().slice(0, 10)}.csv`
-    });
-}));
-
-bot.action('admin_reminder', (ctx) => requireAdmin(ctx, async () => {
-    await ctx.answerCbQuery();
-    const stuck = allLeads().filter(l => l.status !== 'completed');
-    if (stuck.length === 0) return ctx.reply("Yarim yo'lda to'xtagan hech kim yo'q 🎉");
-    const text = "Salom! Vebinar kanaliga qo'shilish uchun ro'yxatdan o'tishni yakunlamagansiz. Davom etish uchun telefon raqamingizni yuboring 👇";
-    await broadcastToAll(ctx, (userId) => ctx.telegram.sendMessage(userId, text, contactKeyboard()));
-}));
-
-bot.action('admin_broadcast_help', (ctx) => requireAdmin(ctx, async () => {
-    await ctx.answerCbQuery();
-    await ctx.reply(
-          "Quyidagi buyruqlarni qo'lda yuboring:\n\n" +
-          "/broadcast Matn — hammaga matn yuborish\n" +
-          "/broadcast_photo Matn — (rasmga reply qilib)\n" +
-          "/broadcast_video — (yumaloq videoga reply qilib)\n" +
-          "/broadcast_voice — (ovozli xabarga reply qilib)\n" +
-          "/import_leads — (CSV faylga reply qilib)"
-        );
-}));
+scheduleDailySummary();
 
 // ---------------------------------------------------------------------------
 bot.launch();
